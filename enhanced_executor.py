@@ -542,4 +542,329 @@ class EnhancedARMExecutor(ARMExecutor):
                 
                 # Show instruction being executed
                 if current_mode == 'ARM':
-                    decoded = self.enhanced_
+                    decoded = self.enhanced_decoder.arm_decoder.decode_instruction(current_instruction, self.pc)
+                    if self.show_instruction_bytes:
+                        print(f"Executing: 0x{current_instruction:08X} -> {decoded}")
+                    else:
+                        print(f"Executing: {decoded}")
+                else:  # THUMB
+                    decoded = self.enhanced_decoder.thumb_decoder.decode_thumb_instruction(current_instruction, self.pc)
+                    if self.show_instruction_bytes:
+                        print(f"Executing: 0x{current_instruction:04X} -> {decoded}")
+                    else:
+                        print(f"Executing: {decoded}")
+            
+            # Execute instruction
+            old_pc = self.pc
+            
+            if self.thumb_mode:
+                success = self.execute_thumb_instruction(current_instruction)
+                self.thumb_cycles += 1
+            else:
+                # Use your existing ARM execution
+                success = self.execute_instruction(current_instruction)
+                self.arm_cycles += 1
+            
+            if not success:
+                print(f"❌ Execution failed at PC: 0x{self.pc:04X}")
+                break
+            
+            # Update PC if not modified by instruction (e.g., branch)
+            if self.pc == old_pc:
+                self.pc += self.instruction_size
+            
+            self.cycle_count += 1
+            
+            if debug:
+                self.print_enhanced_state()
+            
+            if step_by_step:
+                user_input = input("Press Enter to continue, 'q' to quit: ").strip().lower()
+                if user_input == 'q':
+                    print("🛑 Execution stopped by user")
+                    break
+            
+            # Check for termination conditions
+            if self.thumb_mode and current_instruction == 0x4770:  # BX LR in Thumb
+                print(f"\n✅ Program returned (BX LR)")
+                break
+            elif not self.thumb_mode and current_instruction == 0xE1A0F00E:  # MOV PC, LR in ARM
+                print(f"\n✅ Program returned (MOV PC, LR)")
+                break
+        
+        # Execution summary
+        if self.cycle_count >= self.max_cycles:
+            print(f"\n⚠️ Execution stopped - maximum cycles ({self.max_cycles}) reached")
+        
+        print(f"\n{'='*70}")
+        print("EXECUTION COMPLETE")
+        print(f"{'='*70}")
+        print(f"📊 Total cycles: {self.cycle_count}")
+        print(f"📊 ARM cycles: {self.arm_cycles}")
+        print(f"📊 Thumb cycles: {self.thumb_cycles}")
+        print(f"📊 Mode switches: {self.mode_switches}")
+        print(f"📊 Branches taken: {self.branch_predictions}")
+        
+        efficiency = (self.thumb_cycles / max(self.cycle_count, 1)) * 100
+        print(f"📊 Thumb efficiency: {efficiency:.1f}%")
+        print(f"{'='*70}")
+        
+        if debug:
+            self.print_enhanced_state()
+    
+    def print_enhanced_state(self):
+        """Enhanced state display showing mode and execution statistics"""
+        mode_str = self.get_current_mode_string()
+        print(f"\n--- Cycle {self.cycle_count} State [{mode_str}] ---")
+        print(f"PC: 0x{self.pc:04X} (next: 0x{self.get_next_pc():04X})")
+        
+        # Show non-zero registers
+        print("Registers:", end="")
+        shown_any = False
+        for i in range(16):
+            if self.registers[i] != 0:
+                reg_name = self.enhanced_decoder.thumb_decoder.registers.get(i, f'R{i}')
+                print(f" {reg_name}:0x{self.registers[i]:08X}", end="")
+                shown_any = True
+        if not shown_any:
+            print(" (all zero)")
+        else:
+            print()
+        
+        # Show flags
+        active_flags = []
+        if self.flags['N']: active_flags.append('N')
+        if self.flags['Z']: active_flags.append('Z')
+        if self.flags['C']: active_flags.append('C')
+        if self.flags['V']: active_flags.append('V')
+        
+        if active_flags:
+            print(f"Flags: {' '.join(active_flags)}")
+        else:
+            print("Flags: (none set)")
+        
+        # Show execution statistics
+        if self.cycle_count > 0:
+            print(f"Stats: ARM:{self.arm_cycles} Thumb:{self.thumb_cycles} Switches:{self.mode_switches}")
+
+
+# =================================================================
+# TESTING AND EXAMPLES
+# =================================================================
+
+def create_test_programs():
+    """Create test programs for mixed ARM/Thumb execution"""
+    
+    # Test 1: Basic Thumb program
+    with open("test_thumb_basic.txt", "w") as f:
+        f.write("""# Basic Thumb operations test
+# THUMB mode
+2105    # MOV R1, #5
+2203    # MOV R2, #3  
+1840    # ADD R0, R0, R1
+4288    # CMP R0, R1
+D001    # BEQ +2
+1A80    # SUB R0, R0, R2
+4770    # BX LR (return)
+""")
+    
+    # Test 2: ARM compatibility
+    with open("test_arm_compat.txt", "w") as f:
+        f.write("""# ARM compatibility test
+# ARM mode
+E3A01005    # MOV R1, #5
+E3A02003    # MOV R2, #3
+E0813002    # ADD R3, R1, R2
+E1A0F00E    # MOV PC, LR
+""")
+    
+    # Test 3: Mixed mode
+    with open("test_mixed_mode.txt", "w") as f:
+        f.write("""# Mixed ARM/Thumb test
+# ARM mode
+E3A01005    # MOV R1, #5
+E3A02003    # MOV R2, #3
+# THUMB mode  
+2000        # MOV R0, #0
+1840        # ADD R0, R0, R1
+4288        # CMP R0, R1
+4770        # BX LR
+""")
+    
+    print("✅ Created test programs:")
+    print("   - test_thumb_basic.txt")
+    print("   - test_arm_compat.txt") 
+    print("   - test_mixed_mode.txt")
+
+
+def test_enhanced_executor():
+    """Test the enhanced executor with different program types"""
+    
+    # Create test programs
+    create_test_programs()
+    
+    print("\n" + "="*60)
+    print("TESTING ENHANCED ARM/THUMB EXECUTOR")
+    print("="*60)
+    
+    tests = [
+        ("test_thumb_basic.txt", "Basic Thumb Operations"),
+        ("test_arm_compat.txt", "ARM Backward Compatibility"),
+        ("test_mixed_mode.txt", "Mixed ARM/Thumb Program")
+    ]
+    
+    passed_tests = 0
+    total_tests = len(tests)
+    
+    for filename, description in tests:
+        print(f"\n{'='*50}")
+        print(f"🧪 TEST: {description}")
+        print(f"{'='*50}")
+        
+        try:
+            executor = EnhancedARMExecutor()
+            
+            if executor.load_mixed_program(filename):
+                print(f"✅ Program loaded successfully")
+                
+                # Show disassembly
+                executor.disassemble_mixed_program()
+                
+                # Execute
+                print("🚀 Starting execution...")
+                executor.run_mixed_program(debug=False, step_by_step=False)
+                
+                print(f"✅ TEST PASSED: {description}")
+                passed_tests += 1
+                
+            else:
+                print(f"❌ TEST FAILED: Could not load {filename}")
+        
+        except Exception as e:
+            print(f"❌ TEST FAILED: {description}")
+            print(f"   Error: {e}")
+    
+    # Test Summary
+    print(f"\n{'='*60}")
+    print("🏁 TEST SUITE RESULTS")
+    print(f"{'='*60}")
+    print(f"Tests passed: {passed_tests}/{total_tests}")
+    
+    if passed_tests == total_tests:
+        print("🎉 ALL TESTS PASSED! Enhanced ARM/Thumb executor is working!")
+    else:
+        print("⚠️ Some tests failed - see output above for details")
+    
+    print(f"{'='*60}")
+
+
+def run_interactive_mode():
+    """Interactive mode for testing and debugging"""
+    
+    print("\n" + "="*60)
+    print("INTERACTIVE ENHANCED ARM/THUMB EXECUTOR")
+    print("="*60)
+    print("Commands:")
+    print("  load <file>     - Load program")
+    print("  disasm          - Show disassembly")  
+    print("  run             - Run program")
+    print("  step            - Run step-by-step")
+    print("  state           - Show processor state")
+    print("  help            - Show commands")
+    print("  quit            - Exit")
+    print("="*60)
+    
+    executor = EnhancedARMExecutor()
+    
+    while True:
+        try:
+            command = input("\n> ").strip().split()
+            if not command:
+                continue
+            
+            cmd = command[0].lower()
+            
+            if cmd == "quit" or cmd == "q":
+                print("👋 Goodbye!")
+                break
+            
+            elif cmd == "load":
+                if len(command) > 1:
+                    filename = command[1]
+                    executor.load_mixed_program(filename)
+                else:
+                    print("❌ Usage: load <filename>")
+            
+            elif cmd == "disasm" or cmd == "dis":
+                executor.disassemble_mixed_program()
+            
+            elif cmd == "run":
+                executor.run_mixed_program(debug=True, step_by_step=False)
+            
+            elif cmd == "step":
+                executor.run_mixed_program(debug=True, step_by_step=True)
+            
+            elif cmd == "state":
+                executor.print_enhanced_state()
+            
+            elif cmd == "help" or cmd == "h":
+                print("Commands: load, disasm, run, step, state, help, quit")
+            
+            else:
+                print(f"❌ Unknown command: {cmd}")
+                print("Type 'help' for available commands")
+        
+        except KeyboardInterrupt:
+            print("\n👋 Goodbye!")
+            break
+        except Exception as e:
+            print(f"❌ Error: {e}")
+
+
+def main():
+    """Main function with command line interface"""
+    
+    if len(sys.argv) < 2:
+        print("Enhanced ARM/Thumb Executor")
+        print("="*40)
+        print("Usage:")
+        print("  python enhanced_executor.py <program.txt>      # Run mixed program")
+        print("  python enhanced_executor.py test               # Run test suite")
+        print("  python enhanced_executor.py interactive        # Interactive mode")
+        print("  python enhanced_executor.py step <program>     # Step-by-step execution")
+        print("  python enhanced_executor.py create_tests       # Create test programs")
+        return
+    
+    command = sys.argv[1]
+    
+    if command == "test":
+        test_enhanced_executor()
+    
+    elif command == "interactive":
+        run_interactive_mode()
+    
+    elif command == "create_tests":
+        create_test_programs()
+    
+    elif command == "step":
+        if len(sys.argv) > 2:
+            filename = sys.argv[2]
+            executor = EnhancedARMExecutor()
+            if executor.load_mixed_program(filename):
+                executor.disassemble_mixed_program()
+                executor.run_mixed_program(debug=True, step_by_step=True)
+        else:
+            print("❌ Usage: python enhanced_executor.py step <program.txt>")
+    
+    else:
+        # Regular program execution
+        filename = command
+        executor = EnhancedARMExecutor()
+        
+        if executor.load_mixed_program(filename):
+            executor.disassemble_mixed_program()
+            executor.run_mixed_program(debug=True, step_by_step=False)
+
+
+if __name__ == "__main__":
+    main()
